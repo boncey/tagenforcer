@@ -12,22 +12,38 @@ def main
   FlickRaw.api_key = Settings::API_KEY
   FlickRaw.shared_secret = Settings::SHARED_SECRET
   token = Settings::TOKEN
+  secret = Settings::SECRET
   batch_mode = false
 
-  if token == nil
-    token = auth
-    puts "Your token is '#{token}'"
-    leave "Copy/paste into settings.rb then re-run this script"
+  if token == nil || token.empty?
+    begin
+      token = auth
+      puts "Modify settings.rb as below then re-run this script"
+      puts
+      puts "TOKEN = '#{flickr.access_token}'"
+      puts "SECRET = '#{flickr.access_secret}'"
+      puts
+      exit(-1)
+    rescue FlickRaw::OAuthClient::FailedResponse => e
+      leave("Authentication failed : #{e}")
+    end
+  else
+    flickr = FlickRaw::Flickr.new
+    flickr.access_token = token
+    flickr.access_secret = secret
+
+    login = flickr.test.login
+    puts "You are authenticated as #{login.username}"
   end
 
   tag = ARGV[0]
   group = nil
 
   if ARGV.size > 1
-    group = fetch_group(token, ARGV[1])
+    group = fetch_group(flickr, ARGV[1])
     batch_mode = true
   else
-    groups = fetch_moderated_groups(token)
+    groups = fetch_moderated_groups(flickr)
     group = choose_group(groups)
 
     if !group
@@ -35,7 +51,7 @@ def main
     end
   end
 
-  photos = fetch_photos(token, group)
+  photos = fetch_photos(flickr, group)
   to_remove = photos.inject([]) do |to_remove, photo|
     to_remove << photo if (!has_tag?(photo, tag))
 
@@ -53,7 +69,7 @@ def main
   end
 
   if confirm_remove
-    remove_from_group(token, to_remove, group)
+    remove_from_group(flickr, to_remove, group)
   else
     puts "No photos removed from group"
   end
@@ -80,68 +96,59 @@ def choose_group(groups)
 
       confirm = $stdin.gets.chomp
 
-      if confirm == 'y'
-        group = groups[index]
-      end
+      group = groups[index] if confirm == 'y'
     end
   end
-  
-  return group
+
+  group
 end
 
-def remove_from_group(token, photos, group)
+def remove_from_group(flickr, photos, group)
 
   photos.each do |photo|
     url = FlickRaw.url_photopage(photo)
     puts "Removing photo #{url} from group #{group.name}"
 
-    flickr.groups.pools.remove(:auth_token => token, :photo_id => photo.id, :group_id => group.id)
+    flickr.groups.pools.remove(:photo_id => photo.id, :group_id => group.id)
   end
 end
 
-def fetch_photos(token, group)
+def fetch_photos(flickr, group)
   puts "Fetching photos from group #{group.name}..."
-  return flickr.groups.pools.getPhotos(:auth_token => token, :group_id => group.id, :extras => 'tags', :per_page => 500)
+  flickr.groups.pools.getPhotos(:group_id => group.id, :extras => 'tags', :per_page => 500)
 end
 
-def fetch_group(token, group_id)
-  return flickr.groups.getInfo(:auth_token => token, :group_id => group_id)
+def fetch_group(flickr, group_id)
+  flickr.groups.getInfo(:group_id => group_id)
 end
 
 def has_tag?(photo, tag)
-  return photo.tags =~ /\b#{tag}\b/
+  photo.tags =~ /\b#{tag}\b/
 end
 
-def fetch_moderated_groups(token)
+def fetch_moderated_groups(flickr)
   puts "Fetching groups..."
-  groups = flickr.groups.pools.getGroups(:auth_token => token)
+  groups = flickr.groups.pools.getGroups()
   return groups.inject([]) do |mod_groups, group|
-    mod_groups << group if group.admin == 1
+    mod_groups << group if group.admin
 
     mod_groups
   end
 end
 
 def auth
-  frob = flickr.auth.getFrob
-  auth_url = FlickRaw.auth_url :frob => frob, :perms => 'write'
-  token = nil
+  token = flickr.get_request_token
+  auth_url = flickr.get_authorize_url(token['oauth_token'], :perms => 'write')
 
   puts "Open this url in your browser to complete the authentication process:"
   puts "#{auth_url}"
-  puts "Press Enter when you are finished."
-  $stdin.getc
+  `open #{auth_url}`
+  puts "Copy here the number given when you complete the process."
+  verify = $stdin.gets.strip
 
-  begin
-    auth = flickr.auth.getToken :frob => frob
-    login = flickr.test.login
-    puts "You are now authenticated as #{login.username}"
-    token = auth.token
-  rescue FlickRaw::FailedResponse => e
-    $stderr.puts "Authentication failed : #{e.msg}"
-  end
-
-  return token
+  flickr.get_access_token(token['oauth_token'], token['oauth_token_secret'], verify)
+  login = flickr.test.login
+  puts "You are now authenticated as #{login.username}"
 end
 
 def setup
@@ -149,7 +156,7 @@ print <<"EOF";
 Usage: tagenforcer.rb <required tag>
        Prompt for a group to choose from then check and remove photos from that group's pool
        Will prompt for confirmation before removing any photos
-       
+
 Usage: tagenforcer.rb <required tag> <flickr group nsid>
        Check the pool of the specified group and remove photos from that group's pool
        This does not prompt for confirmation - it's designed to be used from cron jobs etc
